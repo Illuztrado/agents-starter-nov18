@@ -1,4 +1,4 @@
-import { createWorkersAI } from "workers-ai-provider";
+import { createAI } from "agents/models/ai-sdk";
 import { callable, routeAgentRequest, type Schedule } from "agents";
 import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
@@ -13,7 +13,7 @@ import { z } from "zod";
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
-  chatRecovery = true;
+  chatRecovery = true as const;
   // Wait for MCP connections to be re-established after hibernation before
   // processing a message, so MCP tools aren't intermittently missing.
   waitForMcpConnections = true;
@@ -48,10 +48,14 @@ export class ChatAgent extends AIChatAgent<Env> {
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
-    const workersai = createWorkersAI({ binding: this.env.AI });
+    const ai = createAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      // Use the ai function returned by createAI with the model identifier
+      // Llama 3.3 70B (supports tool calling)
+      // @cf/meta/llama-3.3-70b-instruct-fp8-fast
+      // @cf/meta/llama-3.1-8b-instruct
+      model: ai("@cf/meta/llama-4-scout-17b-16e-instruct", {
         sessionAffinity: this.sessionAffinity
       }),
       system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
@@ -65,18 +69,26 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
+      // Allow longer responses via Workers AI provider options
+      // providerOptions: {
+      //   workersai: {
+      //     max_tokens: 16384
+      //   }
+      // },
+      toolChoice: "auto",
       tools: {
         // MCP tools from connected servers
-        ...mcpTools,
+        // ...mcpTools,
 
         // Server-side tool: runs automatically on the server
         getWeather: tool({
-          description: "Get the current weather for a city",
+          type: "function",
+          description:
+            "Get the current weather for a city or country from the user's request. Use this when the user asks about the weather.",
           inputSchema: z.object({
             city: z.string().describe("City name")
           }),
           execute: async ({ city }) => {
-            // Replace with a real weather API in production
             const conditions = ["sunny", "cloudy", "rainy", "snowy"];
             const temp = Math.floor(Math.random() * 30) + 5;
             return {
@@ -88,9 +100,29 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
             };
           }
         }),
+        // getWeather: tool({
+        //   description: "Get the current weather for a city",
+        //   inputSchema: z.object({
+        //     city: z.string().describe("City name")
+        //   }),
+        //   execute: async ({ city }) => {
+        //     const res = await fetch(`https://api.weather.example/${city}`);
+        //     return res.json();
+        //     // Replace with a real weather API in production
+        //     // const conditions = ["sunny", "cloudy", "rainy", "snowy"];
+        //     // const temp = Math.floor(Math.random() * 30) + 5;
+        //     // return {
+        //     //   city,
+        //     //   temperature: temp,
+        //     //   condition:
+        //     //     conditions[Math.floor(Math.random() * conditions.length)],
+        //     //   unit: "celsius"
+        //     }
+        // }),
 
         // Client-side tool: no execute function — the browser handles it
         getUserTimezone: tool({
+          type: "function",
           description:
             "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
           inputSchema: z.object({})
@@ -98,6 +130,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
 
         // Approval tool: requires user confirmation before executing
         calculate: tool({
+          type: "function",
           description:
             "Perform a math calculation with two numbers. Requires user approval for large numbers.",
           inputSchema: z.object({
@@ -128,6 +161,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         }),
 
         scheduleTask: tool({
+          type: "function",
           description:
             "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
           inputSchema: scheduleSchema,
@@ -156,6 +190,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         }),
 
         getScheduledTasks: tool({
+          type: "function",
           description: "List all tasks that have been scheduled",
           inputSchema: z.object({}),
           execute: async () => {
@@ -165,6 +200,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         }),
 
         cancelScheduledTask: tool({
+          type: "function",
           description: "Cancel a scheduled task by its ID",
           inputSchema: z.object({
             taskId: z.string().describe("The ID of the task to cancel")
